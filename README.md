@@ -93,8 +93,8 @@ Below are the model checkpoints for the KITTI and NYUv2 datasets, along with the
 
 | Dataset  | a1    | a2    | a3    | Abs Rel | RMSE  | Log_10 | RMSE Log | SILog  | Sq Rel | Checkpoint |
 |----------|-------|-------|-------|---------|-------|--------|----------|--------|--------|------------|
-| KITTI   | 0.971 | 0.997 | 0.999 | 0.053  | 2.183 | 0.023  | 0.082   | 7.210 | 0.164 | [Download](https://univsbadz-my.sharepoint.com/personal/chaouki_ziara_univ-sba_dz/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fchaouki%5Fziara%5Funiv%2Dsba%5Fdz%2FDocuments%2FDepthHist%5FCheckpoints&ga=1) |
-| NYUv2   | 0.904 | 0.987 | 0.997 | 0.102  | 0.362 | 0.044  | 0.129   | 10.191 | 0.053 | [Download](https://univsbadz-my.sharepoint.com/personal/chaouki_ziara_univ-sba_dz/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fchaouki%5Fziara%5Funiv%2Dsba%5Fdz%2FDocuments%2FDepthHist%5FCheckpoints&ga=1) |
+| KITTI   | 0.983 | 0.998 | 0.999 | 0.048  | 1.987 | 0.021  | 0.070   | 6.442 | 0.119 | [Download](https://univsbadz-my.sharepoint.com/personal/chaouki_ziara_univ-sba_dz/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fchaouki%5Fziara%5Funiv%2Dsba%5Fdz%2FDocuments%2FDepthHist%5FCheckpoints&ga=1) |
+| NYUv2   | 0.962 | 0.996 | 0.999 | 0.076  | 0.292 | 0.032  | 0.129   | 8.244 | 0.03 | [Download](https://univsbadz-my.sharepoint.com/personal/chaouki_ziara_univ-sba_dz/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fchaouki%5Fziara%5Funiv%2Dsba%5Fdz%2FDocuments%2FDepthHist%5FCheckpoints&ga=1) |
 
 ## ✍️ Author <a name="author"></a>
 
