@@ -4,7 +4,7 @@
   </a>
 </p>
 
-<h3 align="center">DepthHist: Depth Estimation Using Differentiable Histogram</h3>
+<h3 align="center">DepthHist: Depth Estimation Using Differentiable Histogram with SliceStitch Augmentation</h3>
 
 ---
 
