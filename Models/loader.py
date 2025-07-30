@@ -1,19 +1,26 @@
+# This code was written by Mohammed Chaouki ZIARA, 
+# For Ph.D. Project @ RCAM Laboratory, Djilali Liabes University - Algeria 
+# Below is the code for the model modules
+# Contact: medchaoukiziara@gmail.com || chaouki.ziara@univ-sba.dz
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .networks.swin_transformer import SwinTransformer
+
 
 class DepthHist_encoder(nn.Module):
     def __init__(self, args,  **kwargs):
         super(DepthHist_encoder, self).__init__()        
         window_size = 7
 
-        if args.backbone == 'DepthHistB': #if version[:-2] == 'base':
+        if args.backbone == 'DepthHistB' or args.backbone == 'CrfB': #if version[:-2] == 'base':
             embed_dim = 128
             depths = [2, 2, 18, 2]
             num_heads = [4, 8, 16, 32]
             in_channels = [128, 256, 512, 1024]
-        elif args.backbone == 'DepthHistL': #elif version[:-2] == 'large'
+        elif args.backbone == 'DepthHistL' or args.backbone == 'CrfL' : #elif version[:-2] == 'large'
             embed_dim = 192
             depths = [2, 2, 18, 2]
             num_heads = [6, 12, 24, 48]
@@ -30,7 +37,7 @@ class DepthHist_encoder(nn.Module):
             use_checkpoint=False,
             frozen_stages=-1)
         self.backbone = SwinTransformer(**backbone_cfg)
-        self.backbone.init_weights(pretrained=args.path_pretrained)
+        self.backbone.init_weights(pretrained=args.path_pretrained if args.path_pretrained != None else None )
     
     def forward(self, imgs):
         enc_feats = self.backbone(imgs)
@@ -81,9 +88,13 @@ class DepthHist_decoder(nn.Module):
         
     def forward (self, feats):
         out_1 = self.block_1(feats[-1])
+        out_1 = F.interpolate(out_1, feats[-2].shape[-2:], mode='bilinear')
+        
         out_2 = self.block_2(out_1 + feats[-2])
         out_2 = F.interpolate(out_2, feats[-3].shape[-2:], mode='bilinear')
+
         out_3 = self.block_3(out_2 + feats[-3])
         out_3 = F.interpolate(out_3, feats[-4].shape[-2:], mode='bilinear')
+
         out_4 = self.block_4(out_3 + feats[-4])
         return out_4

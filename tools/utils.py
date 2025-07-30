@@ -95,4 +95,3 @@ def b64_to_pil(b64string):
     image_data = re.sub('^data:image/.+;base64,', '', b64string)
     # image = Image.open(cStringIO.StringIO(image_data))
     return Image.open(BytesIO(base64.b64decode(image_data)))
-

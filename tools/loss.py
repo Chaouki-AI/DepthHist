@@ -5,12 +5,10 @@
 # Contact: medchaoukiziara@gmail.com || chaouki.ziara@univ-sba.dz
 
 import torch
-import warnings
 import torch.nn as nn
-from torch import Tensor
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
-from typing import List, Optional, Tuple, Union
+from pytorch3d.loss import chamfer_distance
 
 class HistLoss(nn.Module):
     def __init__(self, args):
@@ -18,28 +16,19 @@ class HistLoss(nn.Module):
         self.args = args
         self.min = args.min_depth
         self.max = args.max_depth
-        self.t = args.t
-        self.bins = args.bins 
-        self.epsilon = 1e-3
+        self.t = None
+        self.bins = args.bins #int(self.max - int(self.min))
+        self.epsilon = 1e-5
         self.int_len = (self.max - self.min) / self.bins
-        if args.kernel == 'laplacian' :
-            self.estimator = self.laplacian
-        elif args.kernel == 'cauchy' :
-            self.estimator = self.cauchy
-        else  :
-            self.estimator = self.gaussian
-    
-    def __centers__ (self, gt):
-        maxs = gt.view(gt.size(0), -1).max(dim=1, keepdim=True)[0]
-        max_len = torch.tensor(self.bins).to(gt.device)
-        linspace = [torch.linspace(0, max_val.item(), steps=int(max_val.item())+1).unsqueeze(0) for max_val in maxs ]
-        centers = torch.stack([torch.nn.functional.pad(x, (0, int(max_len.item() - x.size(1))), mode='constant', value=0) for x in linspace])
-        centers = centers.view(gt.size(0), -1, 1, 1)
-        return centers
+        
+        self.estimator = {
+            'laplacian': self.laplacian,
+            'cauchy': self.cauchy,
+            'acts': self.acts}.get(args.kernel, self.gaussian)
 
     def gaussian(self, img, centers):
         d = img - centers.to(img.device)
-        s = torch.exp(-torch.square(d) / self.t**2)
+        s = torch.exp(-torch.square(d) / (self.t**2 + self.epsilon))
         s = s / (torch.sum(s, axis=1, keepdims=True) + 1e-10)
         return s
     
@@ -51,7 +40,7 @@ class HistLoss(nn.Module):
     
     def cauchy(self, img, centers):
         d = img - centers.to(img.device)
-        s = 1 / (1 + 100*torch.square(d / (self.t + 1e-10)))
+        s = 1 / (1 + torch.square(d / (self.t + 1e-10)))
         s = s / (torch.sum(s, axis=1, keepdims=True) + 1e-10)
         return s
     
@@ -61,37 +50,36 @@ class HistLoss(nn.Module):
         h = torch.cumsum(h, axis=1) / h.sum(axis=[-1,-2], keepdims=True)
         return h
 
-class Hist1D_loss(HistLoss):
-    def __init__(self, args):
-        super(Hist1D_loss, self).__init__(args=args)
-        self.name = '1DLoss'
-    def forward(self, gt, pred, mask = None, interpolate = False):
-        if interpolate:
-            pred = nn.functional.interpolate(pred, gt.shape[-2:], mode='bilinear', align_corners=True)
-        if mask is not None : 
-            pred = pred*mask
-            gt   = gt*mask
+    def acts(self, image, centers):
+        img_minus_bins_av = torch.sub(image, centers)
+        img_plus_bins_av  = torch.add(image, centers)
+        self.kernel_width = self.interval_length / (self.t + self.epsilon)
+    
+        maps = torch.sigmoid((img_minus_bins_av + self.interval_length / 2) / self.kernel_width) \
+                                 - torch.sigmoid((img_minus_bins_av - self.interval_length / 2) / self.kernel_width) \
+                                 + torch.sigmoid((img_plus_bins_av - 2 * self.min + self.interval_length / 2) / self.kernel_width) \
+                                 - torch.sigmoid((img_plus_bins_av - 2 * self.min - self.interval_length / 2) / self.kernel_width) \
+                                 + torch.sigmoid((img_plus_bins_av - 2 * self.max + self.interval_length / 2) / self.kernel_width) \
+                                 - torch.sigmoid((img_plus_bins_av - 2 * self.max - self.interval_length / 2) / self.kernel_width)
+        maps = maps / (torch.sum(maps, axis=1, keepdims=True) + 1e-10)
+        return maps
 
-        h_gt   = self.function(self.estimator(gt  , self.__centers__(gt)))
-        h_pred = self.function(self.estimator(pred, self.__centers__(gt))) #self.function(pred) # self.function(self.estimator(pred, self.__centers__(pred))) #
-        return self.emd(h_gt, h_pred)
-    
-    def emd(self, h_gt, h_pred):
-        return torch.mean(torch.sum(torch.abs(h_gt - h_pred), dim=1))
-    
 class Hist2D_loss(HistLoss):
     def __init__(self, args):
         super(Hist2D_loss, self).__init__(args=args)
-        self.name = '2DLoss'    
-    def forward(self, gt, pred, mask = None, interpolate = False):
+        self.name = '2DLoss'  
+
+    def forward(self, gt, pred, centers, scales, mask = None, interpolate = False):
+        self.t = scales.unsqueeze(-1).unsqueeze(-1)
         if interpolate:
             pred = nn.functional.interpolate(pred, gt.shape[-2:], mode='bilinear', align_corners=True)
         if mask is not None : 
             #convert inputs
             pred = pred*mask
             gt   = gt*mask
-        h_gt   = torch.cumsum(self.estimator(gt  , self.__centers__(gt))  , 1)   # self.estimator(gt,   self.__centers__(gt))
-        h_pred = torch.cumsum(pred , 1) 
+        h_gt   = self.estimator(gt  , centers)  
+        h_gt = torch.cumsum(h_gt * centers, 1)
+        h_pred = torch.cumsum(pred * centers, 1)
         #print(h_gt.shape, h_pred.shape)
         return self.loss(h_pred, h_gt).mean()
     
@@ -120,6 +108,26 @@ class Hist2D_loss(HistLoss):
         grad_x = F.pad(grad_x, (0, 0, 0, 1))  # Pad height dimension
         return grad_x, grad_y
 
+class CenterLoss(nn.Module):
+    def __init__(self, args):
+        super(CenterLoss, self).__init__()
+        self.name = 'MSELoss'
+        self.args = args
+        self.bins = args.bins
+        self.distance = chamfer_distance    
+    
+    def forward(self, image, pred, centers, mask=None, **kwargs):
+        #centers = nn.functional.interpolate(centers, image.shape[-2:], mode='bilinear', align_corners=True)   
+        
+        target_points = image.flatten(1)  # n, hwc
+        mask = target_points.ge(1e-3)  # only valid ground truth points
+        target_points = [p[m] for p, m in zip(target_points, mask)]
+        target_lengths = torch.Tensor([len(t) for t in target_points]).long().to(image.device)
+        target_points = pad_sequence(target_points, batch_first=True).unsqueeze(2)  # .shape = n, T, 1
+        #print(centers.shape)
+        loss, _ = chamfer_distance(x=centers.squeeze(-1), y=target_points, y_lengths=target_lengths)
+        return loss.mean()
+        
 class SILogLoss(nn.Module): 
     def __init__(self, args):
         super(SILogLoss, self).__init__()
@@ -134,3 +142,5 @@ class SILogLoss(nn.Module):
         g = torch.log(input) - torch.log(target)
         Dg = torch.var(g) + 0.15 * torch.pow(torch.mean(g), 2)
         return torch.sqrt(Dg)
+
+

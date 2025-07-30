@@ -44,3 +44,5 @@ echo "Installation complete. Please restart your terminal or run 'source ~/.bash
 
 # Load the changes to the shell
 source ~/.bashrc
+
+bash ./installEnv.sh

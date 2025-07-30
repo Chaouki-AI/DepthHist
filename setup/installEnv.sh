@@ -50,4 +50,4 @@ mim install mmcv
 
 echo "Environment setup complete! You can now activate the environment using 'conda activate DepthHist'."
 
-wget -P ./Models/pretrained/ https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_base_patch4_window7_224_22k.pth
+#wget -P ./Models/pretrained/ https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_large_patch4_window7_224_22k.pth

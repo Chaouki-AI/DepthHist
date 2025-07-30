@@ -1,3 +1,4 @@
+
 import torch
 import argparse
 import numpy as np
@@ -40,7 +41,7 @@ def eval(args, model, test_loader,  write=True):
 
     # Open file to store evaluation results only if write=True
     if write:
-        file_path = f"./Evals_results/{args.backbone}_{args.dataset}_{args.kernel}_{datetime.now().strftime('%m-%d_%H-%M')}.txt"
+        file_path = f"./Evals_results/{args.dataset}_{args.backbone}_{args.dataset}_{args.kernel}_{datetime.now().strftime('%m-%d_%H-%M')}.txt"
         f = open(file_path, "w")
         f.write("Evaluation Metrics for Each Sample\n")
         f.write(separator + "\n")
@@ -123,7 +124,7 @@ if __name__ == '__main__':
                         help='number of bins to be used in histogram layer')
     parser.add_argument("--backbone", default='DepthHistB', choices=['DepthHistB','DepthHistL','efficientnet'],
                          help='backbone model to be used in the model') 
-    parser.add_argument("--kernel", default='gaussian', choices=['laplacian','cauchy', 'gaussian'],
+    parser.add_argument("--kernel", default='gaussian', choices=['laplacian','cauchy', 'gaussian','acts'],
                          help='backbone model to be used in the model') 
     parser.add_argument("--path-pretrained", default=None,
                         help='pretrained pth file that be use for init intialize for the encoder')

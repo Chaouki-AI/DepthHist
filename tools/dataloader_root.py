@@ -1,5 +1,4 @@
-# This file is mostly taken from BTS; author: Jin Han Lee, with only slight modifications
-# by Mohammed Chaouki ZIARA, 
+# This file is mostly taken from BTS; author: Jin Han Lee, and modified by Mohammed Chaouki ZIARA, 
 # For Ph.D. Project @ RCAM Laboratory, Djilali Liabes University - Algeria 
 # it contains the dataloader used to read, split, preprosess and build the dataloaders
 # please Modify the args on the args_****.txt files to controle the Batch size and the number of images used for training 
@@ -9,7 +8,7 @@
 
 import os
 import random
-
+import copy
 import numpy as np
 import torch
 import torch.utils.data.distributed
@@ -75,57 +74,152 @@ class DataLoadPreprocess(Dataset):
 
         self.images = images
         self.depths = depths
+        self.indexes = [i for i in range(len(self.images))]
 
         self.mode = mode
         self.transform = transform
         self.to_tensor = ToTensor
         self.is_for_online_eval = is_for_online_eval
 
-    def __getitem__(self, idx):
-
-        if self.mode == 'train':
+    def SliceStitch(self, img1_rgb, img2_rgb, img1_out, img2_out, split_width=5, split_value=0):
+        """
+        Combines two images and their outputs either horizontally or vertically, with a split between.
+        
+        Args:
+            img1_rgb (np.ndarray): First RGB image (H, W, 3)
+            img2_rgb (np.ndarray): Second RGB image (H, W, 3)
+            img1_out (np.ndarray): First grayscale output (H, W, 1)
+            img2_out (np.ndarray): Second grayscale output (H, W, 1)
+            split_width (int): Width of the gap between the parts
+            split_value (int or float): Pixel value to fill the gap (default = 0)
             
-            image_path = self.images[idx]
-            depth_path = self.depths[idx]
-            mask = depth_path.replace('depth.npy', 'depth_mask.npy') if self.args.dataset == 'diode' else None
+        Returns:
+            composite_rgb (np.ndarray): Combined RGB image with split
+            composite_out (np.ndarray): Combined grayscale output with split
+        """
+        
+        assert img1_rgb.shape == img2_rgb.shape, "RGB images must have same shape"
+        assert img1_out.shape == img2_out.shape, "Output images must have same shape"
 
-            image    = Image.open(image_path)
-            depth_gt = np.load(depth_path) if self.args.dataset == 'diode' else Image.open(depth_path)
-            mask_gt  = np.load(mask) if self.args.dataset == 'diode' else None #np.load(mask)
-            if self.args.dataset == 'diode':
-                depth_gt = (depth_gt*mask_gt[...,None]).squeeze()
-                depth_gt = Image.fromarray(depth_gt)
+        cut_ratio = random.randint(3, 7) / 10
+        axis = np.random.choice([0, 1])                # 0 = horizontal, 1 = vertical
+        random_cut = np.random.choice([True, False])
+
+        H, W, _ = img1_rgb.shape
+
+        if axis == 0:  # Horizontal
+            
+            cut = int(H * cut_ratio)
+            
+            # RGB split and separator
+            rgb_top = img1_rgb[:cut, :, :]
+            rgb_bottom = img2_rgb[cut:, :, :]
+            rgb_split = np.full((split_width, W, 3), fill_value=split_value, dtype=img1_rgb.dtype)
+            composite_rgb = np.concatenate([rgb_top, rgb_split, rgb_bottom], axis=0)
+
+            # Grayscale output split and separator
+            out_top = img1_out[:cut, :, :]
+            out_bottom = img2_out[cut:, :, :]
+            out_split = np.full((split_width, W, 1), fill_value=split_value, dtype=img1_out.dtype)
+            composite_out = np.concatenate([out_top, out_split, out_bottom], axis=0)
+
+        else:  # Vertical
+            cut = int(W * cut_ratio)
+            
+            # RGB split and separator
+            rgb_left = img1_rgb[:, :cut, :]
+            rgb_right = img2_rgb[:, cut:, :]
+            rgb_split = np.full((H, split_width, 3), fill_value=split_value, dtype=img1_rgb.dtype)
+            composite_rgb = np.concatenate([rgb_left, rgb_split, rgb_right], axis=1)
+
+            # Grayscale output split and separator
+            out_left = img1_out[:, :cut, :]
+            out_right = img2_out[:, cut:, :]
+            out_split = np.full((H, split_width, 1), fill_value=split_value, dtype=img1_out.dtype)
+            composite_out = np.concatenate([out_left, out_split, out_right], axis=1)
+
+        return composite_rgb, composite_out
+
+
+    def __getitem__(self, idx):
+        if self.mode == 'train':
+            sun = [i for i in self.images if 'SUNRGBD' in i] 
+            nyu = [i for i in self.images if 'NYUv2' in i] 
+            image_path, depth_path = self.images[idx], self.depths[idx]
+            if random.random() >= 0.5 : 
+                pick = random.choice(range(len(sun))) if 'SUNRGBD' in image_path else random.choice(range(len(nyu)))
+            else : 
+                pick = None
+            image_path2 =  self.images[pick] if pick is not None else None
+            depth_path2 =  self.depths[pick] if pick is not None else None
+
+            image, image2        = Image.open(image_path), Image.open(image_path2) if pick is not None else None
+            depth_gt, depth_gt2  = Image.open(depth_path), Image.open(depth_path2) if pick is not None else None
+
+
             
             if self.args.dataset == 'kitti':
-                height = image.height
-                width = image.width
-                top_margin = int(height - 352)
-                left_margin = int((width - 1216) / 2)
+                height, height2 = image.height, image2.height if pick is not None else None   
+                width, width2   = image.width , image2.width if pick is not None else None
+                
+                top_margin, top_margin2 = int(height - 352), int(height2 - 352) if pick is not None else None
+                left_margin, left_margin2 = int((width - 1216) / 2), int((width2 - 1216) / 2) if pick is not None else None
+                
                 depth_gt = depth_gt.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
+                depth_gt2 = depth_gt2.crop((left_margin2, top_margin2, left_margin2 + 1216, top_margin2 + 352)) if pick is not None else None
+                
                 image = image.crop((left_margin, top_margin, left_margin + 1216, top_margin + 352))
+                image2 = image2.crop((left_margin2, top_margin2, left_margin2 + 1216, top_margin2 + 352)) if pick is not None else None
 
             # To avoid blank boundaries due to pixel registration
-            if self.args.dataset == 'nyu':
+            else :# self.args.dataset == 'nyu':
                 depth_gt = depth_gt.crop((43, 45, 608, 472))
+                depth_gt2 = depth_gt2.crop((43, 45, 608, 472)) if pick is not None else None
+                
                 image = image.crop((43, 45, 608, 472))
+                image2 = image2.crop((43, 45, 608, 472)) if pick is not None else None
+                
             if random.random() > 0.5:
-                random_angle = (random.random() - 0.5) * 2 * 2.5
-                image = self.rotate_image(image, random_angle)
-                depth_gt = self.rotate_image(depth_gt, random_angle, flag=Image.NEAREST)
+                random_angle, random_angle2 = (random.random() - 0.5) * 2 * 2.5 , (random.random() - 0.5) * 2 * 2.5 if pick is not None else None
+                image, image2 = self.rotate_image(image, random_angle), self.rotate_image(image2, random_angle2) if pick is not None else None
+                depth_gt, depth_gt2 = self.rotate_image(depth_gt, random_angle, flag=Image.NEAREST), self.rotate_image(depth_gt2, random_angle2, flag=Image.NEAREST) if pick is not None else None
 
             image = np.asarray(image, dtype=np.float32) / 255.0
+            depth_gt = np.bitwise_or(np.right_shift(depth_gt, 3), np.left_shift(depth_gt, 16 - 3)) if 'SUNRGBD' in depth_path else depth_gt
             depth_gt = np.asarray(depth_gt, dtype=np.float32)
             depth_gt = np.expand_dims(depth_gt, axis=2)
 
+            if pick is not None : 
+                image2 = np.asarray(image2, dtype=np.float32) / 255.0  if pick is not None else None
+                depth_gt2 = np.bitwise_or(np.right_shift(depth_gt2, 3), np.left_shift(depth_gt2, 16 - 3)) if 'SUNRGBD' in depth_path2 else depth_gt2
+                depth_gt2 = np.asarray(depth_gt2, dtype=np.float32)    if pick is not None else None
+                depth_gt2 = np.expand_dims(depth_gt2, axis=2)          if pick is not None else None
+
+            
             if self.args.dataset == 'nyu' or self.args.dataset == 'sunrgbd':
-                depth_gt = depth_gt / 1000.0
-            elif self.args.dataset == 'kitti':
+                depth_gt = depth_gt.astype(np.single)/1000.  if 'SUNRGBD' in depth_path else depth_gt/1000.
+                depth_gt = np.where(depth_gt>8, 8, depth_gt) if 'SUNRGBD' in depth_path else depth_gt
+
+
+                if pick is not None : 
+                    
+                    depth_gt2 = depth_gt2.astype(np.single)/1000. if 'SUNRGBD' in depth_path2 else depth_gt2/1000.
+                    depth_gt2 = np.where(depth_gt2>8, 8, depth_gt2) if 'SUNRGBD' in depth_path else depth_gt2
+
+
+            image, depth_gt = self.SliceStitch(image, image2, depth_gt, depth_gt2) if pick is not None else (image, depth_gt)
+            
+
+            
+            if self.args.dataset == 'kitti':
                 depth_gt = depth_gt / 256.0
+
             image, depth_gt = self.random_crop(image, depth_gt, self.args.image_height, self.args.image_width)
             image, depth_gt = self.train_preprocess(image, depth_gt)
             sample = {'image': image, 'depth': depth_gt}
 
         else:
+            
             image_path = self.images[idx]
             image = Image.open(image_path)
 
@@ -134,7 +228,6 @@ class DataLoadPreprocess(Dataset):
                 mask = depth_path.replace('depth.npy', 'depth_mask.npy') if self.args.dataset == 'diode' else None
                 has_valid_depth = False
                 try:
-                    #depth_gt = Image.open(depth_path)
                     depth_gt = np.load(depth_path) if self.args.dataset == 'diode' else Image.open(depth_path)
                     mask_gt  = np.load(mask) if self.args.dataset == 'diode' else None
                     has_valid_depth = True
@@ -143,13 +236,20 @@ class DataLoadPreprocess(Dataset):
                 if has_valid_depth:
                     if self.args.dataset == 'diode':
                         depth_gt = (depth_gt*mask_gt[..., None]).squeeze()
-                    depth_gt = np.asarray(depth_gt, dtype=np.float32) 
-                    depth_gt = np.expand_dims(depth_gt, axis=2)
+                    depth_gt = np.asarray(depth_gt, dtype=np.float32) if self.args.dataset != 'sunrgbd' else depth_gt
+
                     image    = np.asarray(image, dtype=np.float32) / 255.0
                     if self.args.dataset == 'nyu' or self.args.dataset == 'sunrgbd':
-                        depth_gt = depth_gt / 1000.0
+                        if self.args.dataset == 'sunrgbd' :
+                            depth_gt = np.bitwise_or(np.right_shift(depth_gt, 3), np.left_shift(depth_gt, 16 - 3))
+                            depth_gt = depth_gt.astype(np.single) / 1000
+                            depth_gt[depth_gt > 8] = 8
+                        else : 
+                            depth_gt = depth_gt / 1000.
                     elif self.args.dataset == 'kitti':
                         depth_gt = depth_gt / 256.0
+                    depth_gt = np.expand_dims(depth_gt, axis=2)
+
 
                 
                 if self.args.dataset == 'kitti':
@@ -196,9 +296,36 @@ class DataLoadPreprocess(Dataset):
         do_augment = random.random()
         if do_augment > 0.5:
             image = self.augment_image(image)
-
         return image, depth_gt
+    
+    def cutflip(self,image,depth,h_graft=None):
 
+        p = random.random()
+        if p>0.3 and p<0.7 :
+            return image,depth
+        image_copy = copy.deepcopy(image)
+        depth_copy = copy.deepcopy(depth)
+        h,w,c = image.shape
+        N = 2    # split numbers
+        h_list=[]      
+        h_interval_list = []        # hight interval
+        for i in range(N-1):
+            if h_graft!=None:
+                h_list.append(h_graft)
+            else:
+                h_list.append(random.randint(int(0.2*h),int(0.8*h)))
+        h_list.append(h)
+        h_list.append(0)  
+        h_list.sort()
+        h_list_inv = np.array([h]*(N+1))-np.array(h_list)
+        for i in range(len(h_list)-1):
+            h_interval_list.append(h_list[i+1]-h_list[i])
+
+        for i in range(N):
+            image[h_list[i]:h_list[i+1],:,:] = image_copy[h_list_inv[i]-h_interval_list[i]:h_list_inv[i],:,:]
+            depth[h_list[i]:h_list[i+1],:,:] = depth_copy[h_list_inv[i]-h_interval_list[i]:h_list_inv[i],:,:]
+        return image,depth
+    
     def augment_image(self, image):
         # gamma augmentation
         gamma = random.uniform(0.9, 1.1)
@@ -223,12 +350,10 @@ class DataLoadPreprocess(Dataset):
     def __len__(self):
         return len(self.images)
 
-
 class ToTensor(object):
     def __init__(self, mode):
         self.mode = mode
         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        #self.normalize  = transforms.Compose([NoOpTransform()])
 
     def __call__(self, sample):
         image = sample['image']

@@ -18,11 +18,6 @@ class BinAttention(nn.Module):
         self.head_dim = self.bins // num_heads
 
         assert self.head_dim * num_heads == self.bins, "Bins must be divisible by num_heads"
-        #if multihead == True: 
-        #    self.multihead = True
-        #    self.multihead_attn = nn.MultiheadAttention(embed_dim=self.bins, num_heads=self.num_heads, batch_first=True)
-        #else : 
-        #    self.multihead = False
         encoder_layers = nn.TransformerEncoderLayer(self.bins, self.num_heads, 1024)
         self.multihead_attn = nn.TransformerEncoder(encoder_layers, num_layers=4)
 
@@ -31,10 +26,7 @@ class BinAttention(nn.Module):
         self.key_proj = nn.Sequential(nn.Linear(self.bins, self.bins), nn.ReLU())
         self.value_proj = nn.Sequential(nn.Linear(self.bins, self.bins), nn.ReLU())
 
-        self.act = nn.ReLU()
 
-        # Output projection
-        #self.out_proj = nn.Sequential(nn.Linear(self.bins, self.bins), self.act)
 
     def forward(self, query, key, value):
 
@@ -45,11 +37,10 @@ class BinAttention(nn.Module):
         input = torch.cat([query, key, value], 0) 
 
         #input = query+key+value
-        attn_weights = self.act(self.multihead_attn(input).permute(1,0,2))
-        attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
+        attn_weights = torch.relu(self.multihead_attn(input).permute(1,0,2))
 
-        # Apply attention to value
         output = torch.einsum("bst,qbk->bk", attn_weights, value) 
+        output = output / output.sum(-1, keepdim = True)
         return output
 
 
@@ -61,26 +52,26 @@ class HistLayer(nn.Module):
         kernel_size = 10
 
         # Set backbone-specific channels
-        if args.backbone == 'DepthHistL':
-            bn_channels = 1536
-        elif args.backbone == 'DepthHistB':
-            bn_channels = 1024
-        else:
-            bn_channels = 2048
+        bn_channels = 1536 if args.backbone == 'DepthHistL' else 1024
+
 
         # Define convolutional layers for center projections
-        self.query_conv_center = self._create_conv_layer(3, args.bins, kernel_size)
-        self.key_conv_center = self._create_conv_layer(bn_channels, args.bins, kernel_size)
-        self.value_conv_center = self._create_conv_layer(128, args.bins, kernel_size)
+        self.query_conv_center = self._create_conv_layer_(3, args.bins, kernel_size)
+        self.key_conv_center = self._create_conv_layer_(bn_channels, args.bins, kernel_size)
+        self.value_conv_center = self._create_conv_layer_(128, args.bins, kernel_size)
 
         # Define convolutional layers for scale projections
-        self.query_conv_scales = self._create_conv_layer(3, args.bins, kernel_size)
-        self.key_conv_scales = self._create_conv_layer(bn_channels, args.bins, kernel_size)
-        self.value_conv_scales = self._create_conv_layer(128, args.bins, kernel_size)
+        self.query_conv_scales = self._create_conv_layer_(3, args.bins, kernel_size)
+        self.key_conv_scales = self._create_conv_layer_(bn_channels, args.bins, kernel_size)
+        self.value_conv_scales = self._create_conv_layer_(128, args.bins, kernel_size)
 
         # Additional layers
-        self.act = nn.ReLU()
-        self.side = nn.Sequential(nn.Conv2d(128, args.bins, kernel_size=1, stride=1, padding=1))
+        self.act = nn.ReLU()    
+        self.side = nn.Sequential(nn.Conv2d(128, args.bins, kernel_size=3, stride=2, padding=1)) #Half 323, same 313
+        #
+        self.sharpness_factor = None
+        self.centers = None
+        self.scales = None
 
         # Attention mechanisms
         self.compute_att_centers = BinAttention(args, num_heads=4)
@@ -88,23 +79,41 @@ class HistLayer(nn.Module):
 
         # Positional encodings
         self.pos_encodings = nn.Parameter(torch.zeros(25000, args.bins), requires_grad=True)
-        nn.init.trunc_normal_(self.pos_encodings, std=0.02)
+        #nn.init.trunc_normal_(self.pos_encodings, std=0.02)
+        with torch.no_grad():
+               self.pos_encodings.copy_(
+                    torch.randint(low=0, high=25000, size=self.pos_encodings.shape).float()/24999.            
+                )
 
         # Kernel selection
         self.estimator = {
             'laplacian': self.laplacian,
-            'cauchy': self.cauchy
+            'cauchy': self.cauchy,
+            'acts': self.acts
         }.get(args.kernel, self.gaussian)
+
+        if args.kernel == 'acts':
+             self.interval_length = (self.args.max_depth - self.args.min_depth) / self.bins
+             self.kernel_width = self.interval_length / 2.5
 
         # Small constant to avoid division by zero
         self.epsilon = 1e-8
-
-    def _create_conv_layer(self, in_channels, out_channels, kernel_size):
-        """Helper function to create a convolutional block with normalization and activation."""
+        self.loss = None
+    def _create_conv_layer_(self, in_channels, out_channels, kernel_size, stride=None, padding=None):
+        """Separable version of the conv layer with same output shape."""
         return nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=kernel_size, padding=0, dilation=3),
-            nn.InstanceNorm2d(out_channels, affine=True),
-            nn.GELU())
+            # Normalization and activation
+            nn.InstanceNorm2d(in_channels, affine=True),
+            
+            # Depthwise convolution
+            nn.Conv2d(in_channels, 128, kernel_size=kernel_size, stride=stride if stride is not None else kernel_size,
+                    padding=padding if padding is not None else 0, dilation=3, groups=1, bias=False),
+            nn.PReLU(128),
+            
+            # Pointwise convolution
+            nn.Conv2d(128, out_channels, kernel_size=1, stride=1, bias=False),
+            nn.PReLU(out_channels)
+        )
 
     def forward(self, rgb, bn, decoded):
         """
@@ -120,6 +129,9 @@ class HistLayer(nn.Module):
         """
 
         # Extract batch size, channels, height, and width
+
+        all = decoded#torch.cat([F.interpolate(rgb, decoded.shape[-2:]),
+              #           decoded], 1)
         b, c, h, w = decoded.size()
 
         # ---------------------------- Process Centers ---------------------------- #
@@ -145,13 +157,6 @@ class HistLayer(nn.Module):
         key_c += pos_encodings_c
         value_c += pos_encodings_c
 
-        # Compute attention for centers
-        centers = self.compute_att_centers(
-            query_c.permute(1, 0, 2), key_c.permute(1, 0, 2), value_c.permute(1, 0, 2)
-        )  # (batch_size, N, bins)
-
-        # Prepare weighted centers
-        weighted_centers = centers.unsqueeze(-1).unsqueeze(-1)
 
         # ---------------------------- Process Scales ---------------------------- #
 
@@ -175,9 +180,17 @@ class HistLayer(nn.Module):
         key_s += pos_encodings_s
         value_s += pos_encodings_s
 
+        # Compute attention for centers
+        centers = self.compute_att_centers(
+            query_c.permute(1, 0, 2), key_c.permute(1, 0, 2), value_s.permute(1, 0, 2) + value_c.permute(1, 0, 2)
+        )  # (batch_size, N, bins)
+
+        # Prepare weighted centers
+        weighted_centers = centers.unsqueeze(-1).unsqueeze(-1)
+
         # Compute attention for scales
         scales = self.compute_att_scales(
-            query_s.permute(1, 0, 2), key_s.permute(1, 0, 2), value_s.permute(1, 0, 2)
+            query_s.permute(1, 0, 2), key_s.permute(1, 0, 2), value_s.permute(1, 0, 2) + value_c.permute(1, 0, 2)
         )  # (batch_size, N, bins)
 
         # Prepare weighted scales
@@ -186,20 +199,24 @@ class HistLayer(nn.Module):
         # ---------------------------- Compute Final Scores ---------------------------- #
 
         # Convert RGB to grayscale (Y channel from YUV)
-        decoded = (
-            0.2989 * rgb[:, 0, :, :]
-            + 0.5870 * rgb[:, 1, :, :]
-            + 0.1140 * rgb[:, 2, :, :]
-        )
+        #decoded = (
+        #    0.2989 * rgb[:, 0, :, :]
+        #    + 0.5870 * rgb[:, 1, :, :]
+        #    + 0.1140 * rgb[:, 2, :, :]
+        #)
 
         # Resize to match the original dimensions
-        decoded = F.interpolate(decoded.unsqueeze(1), (h, w))
+        #decoded = F.interpolate(decoded.unsqueeze(1), (h, w))
 
         # Compute final scores
-        scores = self.estimator(decoded, weighted_centers, weighted_scales)
+        scores = self.estimator(self.side(decoded), weighted_centers, weighted_scales)
+        #scores = scores / scores.sum(1, keepdim = True)
+        self.sharpness_factor = scores
+        self.centers = weighted_centers
+        self.scales = scales
 
-        return scores
-     
+        return scores, weighted_centers
+    
     def gaussian(self, data, centers, scales):
         '''
             Compute the soft histogram using a gaussian kernel.
@@ -219,6 +236,32 @@ class HistLayer(nn.Module):
         scores = scores / (torch.sum(scores, dim=1, keepdim=True) + self.epsilon)
         
         return scores
+    
+    def acts(self, data, centers, scales):
+        '''
+            Compute the soft histogram using a huennet kernel.
+            Args:
+                data (Tensor): Input data of shape (batch_size, bins, H, W).
+                centers (Tensor): Centers of the bins.
+                scales (Tensor): Scale parameters for the Laplacian distribution.
+            Returns:
+                Tensor: histogram representation.
+        '''
+        # Compute the difference between the data and the bin centers
+        img_minus_bins_av = data  - centers
+        img_plus_bins_av  = data  + centers
+        self.kernel_width = self.interval_length / (scales + self.epsilon)
+        
+        # Apply the gaussian kernel
+        maps = torch.sigmoid((img_minus_bins_av + self.interval_length / 2) / self.kernel_width) \
+                                 - torch.sigmoid((img_minus_bins_av - self.interval_length / 2) / self.kernel_width) \
+                                 + torch.sigmoid((img_plus_bins_av - 2 * self.args.min_depth + self.interval_length / 2) / self.kernel_width) \
+                                 - torch.sigmoid((img_plus_bins_av - 2 * self.args.min_depth - self.interval_length / 2) / self.kernel_width) \
+                                 + torch.sigmoid((img_plus_bins_av - 2 * self.args.max_depth + self.interval_length / 2) / self.kernel_width) \
+                                 - torch.sigmoid((img_plus_bins_av - 2 * self.args.max_depth - self.interval_length / 2) / self.kernel_width)
+        maps = maps / (torch.sum(maps, axis=1, keepdims=True) + 1e-10)        
+        
+        return maps
     
     def laplacian(self, data, centers, scales):
         '''
@@ -325,4 +368,3 @@ class Encoder_EffNet(nn.Module):
             else:
                 features.append(v(features[-1]))
         return features
-

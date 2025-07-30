@@ -152,8 +152,8 @@ class UnetAdaptiveBins(nn.Module):
         super(UnetAdaptiveBins, self).__init__()
         norm='linear'
         self.num_classes = n_bins
-        self.min_val = args['min_depth']
-        self.max_val = args['max_depth']
+        self.min_val = args.min_depth
+        self.max_val = args.max_depth
         self.encoder = Encoder(backend)
         self.adaptive_bins_layer = mViT(128, n_query_channels=128, patch_size=16,
                                         dim_out=n_bins,
@@ -182,7 +182,7 @@ class UnetAdaptiveBins(nn.Module):
 
         pred = torch.sum(out * centers, dim=1, keepdim=True)
 
-        return bin_edges, pred
+        return pred, bin_edges 
 
     def get_1x_lr_params(self):  # lr/10 learning rate
         return self.encoder.parameters()

@@ -7,11 +7,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .modules import Encoder_EffNet, Decoder_EffNet, HistLayer
+from .modules import HistLayer
 from .loader import DepthHist_encoder, DepthHist_decoder
 
-import torch
-import torch.nn as nn
 
 class DepthHist(nn.Module):
 
@@ -32,39 +30,28 @@ class DepthHist(nn.Module):
             - simple: A boolean flag indicating whether to use the simple mode. 
     """
     
-    def __init__(self, backend, args):
-        """
-        Initializes the DepthHist model.
-
-        Attributes:
-            - backend: The backbone model used for encoding.
-            - args: The arguments for the model, including the number of bins and whether to use the simple mode.
-            - simple: A boolean flag indicating whether to use the simple mode.
-        """
+    def __init__(self, args):
         super(DepthHist, self).__init__()
         # Initialize the encoder based on the backend provided
         self.args = args
         if args.path_pth_model == None :
             self.set_seed(22)
             print("\n\n\nThe weights will be initialized evenly\n\n\n")
-        if backend is not None : 
-            self.encoder = Encoder_EffNet(backend)
-            self.decoder = Decoder_EffNet(num_classes=128)
-        elif args.backbone == 'DepthHistB' or args.backbone == 'DepthHistL' :
-            self.encoder = DepthHist_encoder(args)
-            self.decoder = DepthHist_decoder(args)
-        # Determine if the model is in simple mode or not
+        
+        self.encoder = DepthHist_encoder(args)
+        self.decoder = DepthHist_decoder(args)
+    
         self.simple = args.simple
         
-        self.ind = 11 if  args.backbone == 'efficientnet' else -1
+
         # Number of bins for the output
         self.bins = args.bins
 
         # Initialize the output convolution layer and histogram if not in simple mode
         self.conv_out = nn.Sequential(
-            nn.Conv2d(128, 1 if self.simple else self.bins, kernel_size=1, stride=1, padding=0),
-            nn.ReLU()
-        )
+            nn.Conv2d(128, 1 , kernel_size=1, stride=1, padding=1),
+            nn.ReLU() 
+        ) if self.simple else nn.Identity()
 
         # If not in simple mode, initialize the histogram layer
         if not self.simple:
@@ -75,11 +62,15 @@ class DepthHist(nn.Module):
 
 
     def forward(self, x, **kwargs):
+        if self.args.backbone == 'NewCRFB' or self.args.backbone == 'NewCRFL':
+            decoded, bn = self.model(x)
+            return self._compute_output(x, bn, decoded)
+        else :
             # Pass through the encoder and decoder
             encoded = self.encoder(x)
             decoded = self.decoder(encoded, **kwargs)
             # Return the appropriate output based on whether the model is in simple mode or not
-            return self._compute_output(x, encoded[self.ind], decoded)
+            return self._compute_output(x, encoded[-1], decoded)
 
     def _compute_output(self, rgb, bn, decoded):
         if self.simple:
@@ -87,31 +78,19 @@ class DepthHist(nn.Module):
             return unet_out
         else:
             # Compute histogram and depth for non-simple mode
-            histogram = self.Histogram(rgb, bn, decoded)
-            decoded   = self.conv_out(decoded)
-            depth     = torch.cumsum(decoded * histogram,  dim=1)[:,-1:,...] #keepdim=True,
-            return depth, histogram #, decoded
+            histogram, centers = self.Histogram(rgb, bn, decoded)
+            centers = centers * (self.args.max_depth - self.args.min_depth)
+            depth   = torch.cumsum(centers * histogram,  dim=1)[:,-1:,...]
+            return depth, histogram, centers
 
     @classmethod
     def build(cls, args, **kwargs):
         # Method to build the model with the appropriate backbone
         print('Building Encoder --- Decoder model .....', end='\n')
-        if args.backbone == "efficientnet":
-            basemodel_name = 'tf_efficientnet_b5_ap'
-            print(f'\n\nLoading base model {basemodel_name}\n', end=' ')
-            basemodel = torch.hub.load('rwightman/gen-efficientnet-pytorch', basemodel_name, pretrained=True, verbose=False)
-            print('Done.')
-
-            # Remove global pooling and classifier layers
-            basemodel.global_pool = nn.Identity()
-            basemodel.classifier = nn.Identity()
-        else :
-            print(f'\n\nLoading base model {args.backbone} \n', end=' ')
-            print('Done.')
-            basemodel = None
-            
+        print(f'\n\nLoading base model {args.backbone} \n', end=' ')
+        print('Done.')
         # Instantiate the class with the appropriate configuration
-        return cls(basemodel, args, **kwargs)
+        return cls(args, **kwargs)
 
     def get_1x_lr_params(self):
         # Return parameters of the encoder for lower learning rate
@@ -124,6 +103,7 @@ class DepthHist(nn.Module):
             modules.append(self.Histogram)
         for m in modules:
             yield from m.parameters()
+
     
     def set_seed(self, seed):
         """

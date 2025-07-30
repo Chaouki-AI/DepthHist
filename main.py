@@ -5,11 +5,12 @@
 # Contact: medchaoukiziara@gmail.com || chaouki.ziara@univ-sba.dz
 
 
+import random
 import argparse
 from datetime import datetime
 from helper import load_model, load_images_deps, load_dl, \
                     load_optimizer_and_scheduler, load_devices, save_ckpt, \
-                    pick_n_elements, trainer, evaluator, save_metrics_to_file, load_summary_writer
+                    pick_n_elements, trainer, evaluator, load_summary_writer
 
 
 
@@ -19,32 +20,31 @@ if __name__ == '__main__':
     parser.add_argument("--simple", action="store_false", 
                         help="Choose whether using a model with histogram layer or only Encoder-Decoder model") 
     
-    parser.add_argument("--bins", default=128, type=int,
+    parser.add_argument("--bins", default=36, type=int,
                         help='number of bins to be used in histogram layer')
-    parser.add_argument("--backbone", default='DepthHistB', choices=['DepthHistB','DepthHistL','efficientnet'],
+    parser.add_argument("--backbone", default='DepthHistB', choices=['DepthHistB','DepthHistL'],
                          help='backbone model to be used in the model') 
     
-    parser.add_argument("--kernel", default='gaussian', choices=['laplacian','cauchy', 'gaussian'],
+    parser.add_argument("--kernel", default='gaussian', choices=['laplacian','cauchy', 'gaussian','acts'],
                          help='backbone model to be used in the model') 
     parser.add_argument("--path-pretrained", default=None,
                         help='pretrained pth file that be use for init intialize for the encoder')
     parser.add_argument("--path-pth-model", default=None,
                         help='pretrained pth file that be use for init intialize for the model')
-    
+
     # Training Hyperparameters
     parser.add_argument("--epochs", default=100, type=int,
                         help='number of epochs')
-    parser.add_argument("--bs", default=32, type=int,
+    parser.add_argument("--bs", default=2, type=int,
                         help='batch size for training')
     parser.add_argument("--all-images", action="store_false", default=True,
-                        help="to specify if we will use all the images for training or only a subset of dataset")
+                        help="to specify if we will use all the images for training or only a limited number of images")
     parser.add_argument("--Nb-imgs", type=int, default=2000, 
                         help='Number of images to be used for training (required if use-all-images is true)')
     
-
     # Dataset parameters 
     parser.add_argument("--dataset", default="kitti", type=str, 
-                        help='dataset used for training, kitti or nyu')
+                        help='dataset used for training, kitti, nyu or diode')
     parser.add_argument("--train-txt", default="./Data/splits/kitti/kitti_eigen_train_files_with_gt.txt", type=str, 
                         help='path to the filenames text file for training')
     parser.add_argument("--test-txt", default="./Data/splits/kitti/kitti_eigen_test_files_with_gt.txt", type=str, 
@@ -69,15 +69,12 @@ if __name__ == '__main__':
                         help='path used to save training and testing logs as tb')
 
     # Loss parameters
-    parser.add_argument("--scale-silog", type=float, default=10., 
+    parser.add_argument("--scale-silog", type=float, default=5., 
                         help='factor to be multiplied with silog loss')
-    parser.add_argument("--scale-joint", type=float, default=0.1, 
-                        help='factor to be multiplied with joint loss')
-    parser.add_argument("--scale-hist", type=float, default=0.1, 
-                        help='factor to be multiplied with histogram loss')
-    parser.add_argument("--t", type=float, default=0.1, 
-                        help='factor to be used as dispersion factor with the Histogram Losses')
-    
+    parser.add_argument("--scale-hist", type=float, default=1., 
+                        help='factor to be multiplied with histogram loss loss')
+    parser.add_argument("--scale-center", type=float, default=0.1, 
+                        help='factor to be multiplied with center loss')
 
     # Optimizer parameters
     parser.add_argument("--optimizer", default="AdamW", type=str, help="name of the optimizer to be used for training",
@@ -103,7 +100,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     bins = 0 if args.simple else args.bins
         
-    name = f"{args.backbone}_{args.dataset}_bins-{bins}_SI-{args.scale_silog}_2D-{args.scale_joint}_1D-{args.scale_hist}_{datetime.now().strftime('%m_%d_%H_%M')}"
+    name = f"{args.backbone}_{args.kernel}_{args.dataset}_bins-{bins}_SI-{args.scale_silog}_HistLoss-{args.scale_hist}_CenterLoss-{args.scale_center}_{datetime.now().strftime('%m_%d_%H_%M')}"
+    
     #Load Summary Writer 
     writer = load_summary_writer(args, name)
 
@@ -119,9 +117,11 @@ if __name__ == '__main__':
     print(f"\n\n\ndata from {args.dataset} dataset loaded Perfectly with : \
           \n{len(imgs_tr)} images for training, \
           \n{len(imgs_ts)} for Testing\n\n\n" )
+    
+    images, depths = pick_n_elements(args, imgs_tr, deps_tr)
 
     #Create the Optimizer 
-    optimizer, scheduler = load_optimizer_and_scheduler(args, model, N_imgs = len(imgs_tr))
+    optimizer, scheduler = load_optimizer_and_scheduler(args, model, N_imgs = len(images))
 
     #Get the Devices ; 
     device_tr, device_ts = load_devices(args)
@@ -129,15 +129,19 @@ if __name__ == '__main__':
  
     #loop
     for epoch in range(0, args.epochs):
+
+        #load images
+        images, depths = pick_n_elements(args, imgs_tr, deps_tr)
         
-        images, depths = pick_n_elements(args, imgs_tr, deps_tr )
-        
-        #create Train Dataloader
+        #load dataloader
         train_dl = load_dl(args, imgs=images, depths=depths, train=True)
+        
         #train
         model, optimizer, scheduler, writer = trainer(args, model, train_dl, optimizer, scheduler, epoch, device_tr, writer)
+        
         #evaluate
         model, filename, writer, metrics =  evaluator(args, model, valid_dl, epoch, device = device_ts, writer = writer, name=name)
+        
         #save the ckpts
         save_ckpt(args, model, metrics, name, epoch)
      
